@@ -4,11 +4,11 @@ Convenient shortcuts to manage or check object permissions.
 import warnings
 from collections import defaultdict
 from itertools import groupby
-from typing import Type, List, Union, NamedTuple
+from typing import Type, List, Union, NamedTuple, Optional
 
 from django.apps import apps
 from django.contrib.auth import get_user_model
-from django.contrib.auth.models import Group, Permission
+from django.contrib.auth.models import Group, Permission, User
 from django.contrib.contenttypes.models import ContentType
 from django.db.models import Count, Q, QuerySet, Model
 from django.shortcuts import _get_queryset
@@ -17,6 +17,7 @@ from guardian.core import ObjectPermissionChecker
 from guardian.ctypes import get_content_type
 from guardian.exceptions import MixedContentTypeError, WrongAppError, MultipleIdentityAndObjectError
 from guardian.models import GroupObjectPermission
+from guardian.typings import StrPerms, ModelType, OptModelType
 from guardian.utils import get_anonymous_user, get_group_obj_perms_model, get_identity, get_user_obj_perms_model
 
 
@@ -378,7 +379,7 @@ class _ObjectFilter(NamedTuple):
     codenames:set
     queryset:QuerySet
 
-def _prepare_filter(*,perms:Union[str,List[str]],klass:[Type[Model]]=None):
+def _prepare_filter(*,perms:StrPerms,klass:[Type[Model]]=None):
     if isinstance(perms, str):
         perms = [perms]
     ctype = None
@@ -422,7 +423,7 @@ def _prepare_filter(*,perms:Union[str,List[str]],klass:[Type[Model]]=None):
 
     return _ObjectFilter(codenames=codenames, ctype=ctype,queryset=queryset)
 
-def get_objects_for_user(user, perms, klass=None, use_groups=True, any_perm=False,
+def get_objects_for_user(user:User, perms:StrPerms, klass:OptModelType=None, use_groups=True, any_perm=False,
                          with_superuser=True, accept_global_perms=True):
     """
     Returns queryset of objects for which a given ``user`` has *all*
@@ -634,7 +635,7 @@ def get_objects_for_user(user, perms, klass=None, use_groups=True, any_perm=Fals
     return queryset.filter(q)
 
 
-def get_objects_for_group(group, perms, klass=None, any_perm=False, accept_global_perms=True):
+def get_objects_for_group(group:Group, perms:StrPerms, klass:OptModelType=None, any_perm=False, accept_global_perms=True):
     """
     Returns queryset of objects for which a given ``group`` has *all*
     permissions present at ``perms``.
@@ -699,14 +700,10 @@ def get_objects_for_group(group, perms, klass=None, any_perm=False, accept_globa
     # match which means: ctype.model_class() == queryset.model
     # we should also have ``codenames`` list
 
-    global_perms = set()
     if accept_global_perms:
-        global_perm_set = group.permissions.values_list('codename', flat=True)
-        for code in codenames:
-            if code in global_perm_set:
-                global_perms.add(code)
-        for code in global_perms:
-            codenames.remove(code)
+        group_global_perm_set = set(group.permissions.values_list('codename', flat=True))
+        global_perms = info.codenames & group_global_perm_set
+        codenames = info.codenames - global_perms
         if len(global_perms) > 0 and (len(codenames) == 0 or any_perm):
             return queryset
 
