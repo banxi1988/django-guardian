@@ -4,7 +4,7 @@ Convenient shortcuts to manage or check object permissions.
 import warnings
 from collections import defaultdict
 from itertools import groupby
-from typing import Type, List, Union, NamedTuple, Optional, Tuple
+from typing import Type, List, Union, NamedTuple, Optional, Tuple, Set
 
 from django.apps import apps
 from django.contrib.auth import get_user_model
@@ -605,14 +605,7 @@ def get_objects_for_user(user:User, perms:StrPerms, klass:OptModelType=None, use
             user_obj_perms = user_obj_perms_queryset.values_list(*user_fields)
             groups_obj_perms = groups_obj_perms_queryset.values_list(*group_fields)
             data = list(user_obj_perms) + list(groups_obj_perms)
-            # sorting/grouping by pk (first in result tuple)
-            keyfunc = lambda t: t[0]
-            data = sorted(data, key=keyfunc)
-            pk_list = []
-            for pk, group in groupby(data, keyfunc):
-                obj_codenames = set((e[1] for e in group))
-                if codenames.issubset(obj_codenames):
-                    pk_list.append(pk)
+            pk_list = _filter_perm_pks(codenames=codenames, pk_codename_pairs=data)
             objects = queryset.filter(pk__in=pk_list)
             return objects
 
@@ -634,6 +627,17 @@ def get_objects_for_user(user:User, perms:StrPerms, klass:OptModelType=None, use
 
     return queryset.filter(q)
 
+def _filter_perm_pks(*,codenames:Set[str],pk_codename_pairs:List[Tuple[int,str]]) -> List[int]:
+    # 这里主要是将不同的权限按对象ID分组, 因为一个对象有多种权限.
+    # groupby 要求先排序,这与 sort |uniq 类似,但是与 SQL 中的 group 不一样
+    keyfunc = lambda t: t[0]  # sorting/grouping by pk (first in result tuple)
+    sorted_pairs = sorted(pk_codename_pairs, key=keyfunc)
+    pk_list = []
+    for pk, group in groupby(sorted_pairs, keyfunc):
+        obj_codenames = set((e[1] for e in group))
+        if codenames <= obj_codenames:
+            pk_list.append(pk)
+    return pk_list
 
 def get_objects_for_group(group:Group, perms:StrPerms, klass:OptModelType=None, any_perm=False, accept_global_perms=True):
     """
@@ -724,20 +728,15 @@ def get_objects_for_group(group:Group, perms:StrPerms, klass:OptModelType=None, 
     if not any_perm and len(codenames):
         groups_obj_perms = groups_obj_perms_queryset.values_list(*fields)
         data:List[Tuple[int,str]] = list(groups_obj_perms)
-
-        # 这里主要是将不同的权限按对象ID分组, 因为一个对象有多种权限.
-        # groupby 要求先排序,这与 sort |uniq 类似,但是与 SQL 中的 group 不一样
-        keyfunc = lambda t: t[0]  # sorting/grouping by pk (first in result tuple)
-        data = sorted(data, key=keyfunc)
-        pk_list = []
-        for pk, group in groupby(data, keyfunc):
-            obj_codenames = set((e[1] for e in group))
-            if codenames <= obj_codenames:
-                pk_list.append(pk)
+        pk_list = _filter_perm_pks(codenames=codenames,pk_codename_pairs=data)
         objects = queryset.filter(pk__in=pk_list)
         return objects
 
     values = groups_obj_perms_queryset.values_list(fields[0], flat=True)
     if group_model.objects.is_generic():
-        values = list(values)
-    return queryset.filter(pk__in=values)
+        values = list(values) # 避免泛型表的形成深度连接
+        q = queryset.filter(pk__in=values)
+    else:
+        q = queryset.filter(pk__in=values)
+        raise Exception("who called me?")
+    return q
