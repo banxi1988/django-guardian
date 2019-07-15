@@ -17,11 +17,26 @@ from guardian.core import ObjectPermissionChecker
 from guardian.ctypes import get_content_type
 from guardian.exceptions import MixedContentTypeError, WrongAppError, MultipleIdentityAndObjectError
 from guardian.models import GroupObjectPermission
-from guardian.typings import StrPerms, ModelType, OptModelType
+from guardian.typings import StrPerms, ModelType, OptModelType, Owner
 from guardian.utils import get_anonymous_user, get_group_obj_perms_model, get_identity, get_user_obj_perms_model
 
 
-def assign_perm(perm, user_or_group, obj=None):
+def _check_perm(*,perm:Union[Permission,str], obj):
+    if isinstance(perm, Permission):
+        return perm
+    if obj is None:
+          try:
+              app_label, codename = perm.split('.', 1)
+          except ValueError:
+              raise ValueError("For global permissions, first argument must be in"
+                               " format: 'app_label.codename' (is %r)" % perm)
+          return Permission.objects.get(content_type__app_label=app_label,
+                                        codename=codename)
+    else:
+        return perm.split('.')[-1]
+
+
+def assign_perm(perm:Union[str,Permission],user_or_group:Union[Owner,List[Owner],QuerySet],obj:Union[Model,QuerySet,None]=None):
     """
     Assigns permission to user/group and object pair.
 
@@ -31,7 +46,7 @@ def assign_perm(perm, user_or_group, obj=None):
       ``Permission`` instance.
 
     :param user_or_group: instance of ``User``, ``AnonymousUser``, ``Group``,
-      list of ``User`` or ``Group``, or queryset of ``User`` or ``Group``; 
+      list of ``User`` or ``Group``, or queryset of ``User`` or ``Group``;
       passing any other object would raise
       ``guardian.exceptions.NotUserNorGroup`` exception
 
@@ -70,53 +85,30 @@ def assign_perm(perm, user_or_group, obj=None):
     <Permission: sites | site | Can change site>
 
     """
-    user, group = get_identity(user_or_group)
-    # If obj is None we try to operate on global permissions
+    perm = _check_perm(perm=perm,obj=obj)
+    is_multiple_owners = isinstance(user_or_group,(QuerySet,list))
+    is_multiple_objs = isinstance(obj, QuerySet)
+    if is_multiple_owners and is_multiple_objs:
+        raise MultipleIdentityAndObjectError("Only bulk operations on either users/groups OR objects supported")
+    user,group = get_identity(user_or_group)
+    owner = user or group
+    assert owner
     if obj is None:
-        if not isinstance(perm, Permission):
-            try:
-                app_label, codename = perm.split('.', 1)
-            except ValueError:
-                raise ValueError("For global permissions, first argument must be in"
-                                 " format: 'app_label.codename' (is %r)" % perm)
-            perm = Permission.objects.get(content_type__app_label=app_label,
-                                          codename=codename)
-
-        if user:
-            user.user_permissions.add(perm)
-            return perm
-        if group:
-            group.permissions.add(perm)
-            return perm
-
-    if not isinstance(perm, Permission):
-        perm = perm.split('.')[-1]
-
-    if isinstance(obj, QuerySet):
-        if isinstance(user_or_group, (QuerySet, list)):
-            raise MultipleIdentityAndObjectError("Only bulk operations on either users/groups OR objects supported")
-        if user:
-            model = get_user_obj_perms_model(obj.model)
-            return model.objects.bulk_assign_perm(perm, user, obj)
-        if group:
-            model = get_group_obj_perms_model(obj.model)
-            return model.objects.bulk_assign_perm(perm, group, obj)
-
-    if isinstance(user_or_group, (QuerySet, list)):
-        if user:
-            model = get_user_obj_perms_model(obj)
-            return model.objects.assign_perm_to_many(perm, user, obj)
-        if group:
-            model = get_group_obj_perms_model(obj)
-            return model.objects.assign_perm_to_many(perm, group, obj)
-
+      if user:
+        user.user_permissions.add(perm)
+      else:
+        group.permissions.add(perm)
+      return perm
+    obj_model = obj.model if is_multiple_objs else obj
     if user:
-        model = get_user_obj_perms_model(obj)
-        return model.objects.assign_perm(perm, user, obj)
-
-    if group:
-        model = get_group_obj_perms_model(obj)
-        return model.objects.assign_perm(perm, group, obj)
+        model = get_user_obj_perms_model(obj_model)
+    else:
+        model = get_group_obj_perms_model(obj_model)
+    if is_multiple_objs:
+        return model.objects.bulk_assign_perm(perm,owner,obj)
+    if is_multiple_owners:
+        return model.objects.assign_perm_to_many(perm, owner,obj)
+    return model.objects.assign_perm(perm, owner,obj)
 
 
 def assign(perm, user_or_group, obj=None):
@@ -144,40 +136,27 @@ def remove_perm(perm, user_or_group=None, obj=None):
       Default is ``None``.
 
     """
+    perm = _check_perm(perm=perm,obj=obj)
     user, group = get_identity(user_or_group)
+    owner = user or group
+    assert owner
+    is_multiple_objs = isinstance(obj, QuerySet)
     if obj is None:
-        try:
-            app_label, codename = perm.split('.', 1)
-        except ValueError:
-            raise ValueError("For global permissions, first argument must be in"
-                             " format: 'app_label.codename' (is %r)" % perm)
-        perm = Permission.objects.get(content_type__app_label=app_label,
-                                      codename=codename)
         if user:
             user.user_permissions.remove(perm)
-            return
-        elif group:
+        else:
             group.permissions.remove(perm)
-            return
+        return
 
-    if not isinstance(perm, Permission):
-        perm = perm.split('.')[-1]
-
-    if isinstance(obj, QuerySet):
-        if user:
-            model = get_user_obj_perms_model(obj.model)
-            return model.objects.bulk_remove_perm(perm, user, obj)
-        if group:
-            model = get_group_obj_perms_model(obj.model)
-            return model.objects.bulk_remove_perm(perm, group, obj)
-
+    obj_model = obj.model if is_multiple_objs else obj
     if user:
-        model = get_user_obj_perms_model(obj)
-        return model.objects.remove_perm(perm, user, obj)
-
-    if group:
-        model = get_group_obj_perms_model(obj)
-        return model.objects.remove_perm(perm, group, obj)
+        model = get_user_obj_perms_model(obj_model)
+    else:
+        model = get_group_obj_perms_model(obj_model)
+    if is_multiple_objs:
+        return model.objects.bulk_remove_perm(perm, owner, obj)
+    else:
+      return model.objects.remove_perm(perm, owner, obj)
 
 
 def get_perms(user_or_group, obj):
@@ -544,15 +523,11 @@ def get_objects_for_user(user:User, perms:StrPerms, klass:OptModelType=None, use
     if user.is_anonymous:
         user = get_anonymous_user()
 
-    global_perms = set()
     has_global_perms = False
     # a superuser has by default assigned global perms for any
     if accept_global_perms and with_superuser:
-        for code in codenames:
-            if user.has_perm(ctype.app_label + '.' + code):
-                global_perms.add(code)
-        for code in global_perms:
-            codenames.remove(code)
+        global_perms = { code for code in codenames if user.has_perm(ctype.app_label + '.' + code) }
+        codenames = codenames - global_perms
         # prerequisite: there must be elements in global_perms otherwise just follow the procedure for
         # object based permissions only AND
         # 1. codenames is empty, which means that permissions are ONLY set globally, therefore return the full queryset.
@@ -588,9 +563,12 @@ def get_objects_for_user(user:User, perms:StrPerms, klass:OptModelType=None, use
 
     if use_groups:
         group_model = get_group_obj_perms_model(queryset.model)
+        # 一般是 group__user 除非手动修改了 user 的关联查询名称
+        group_lookup_by_user = 'group__%s' % get_user_model().groups.field.related_query_name()
+
         group_filters = {
             'permission__content_type': ctype,
-            'group__%s' % get_user_model().groups.field.related_query_name(): user,
+            group_lookup_by_user: user,
         }
         if len(codenames):
             group_filters.update({
@@ -601,7 +579,7 @@ def get_objects_for_user(user:User, perms:StrPerms, klass:OptModelType=None, use
             group_fields = generic_fields
         else:
             group_fields = direct_fields
-        if not any_perm and len(codenames) > 1 and not has_global_perms:
+        if any_perm == False and len(codenames) > 1 and  has_global_perms == False:
             user_obj_perms = user_obj_perms_queryset.values_list(*user_fields)
             groups_obj_perms = groups_obj_perms_queryset.values_list(*group_fields)
             data = list(user_obj_perms) + list(groups_obj_perms)
@@ -609,7 +587,8 @@ def get_objects_for_user(user:User, perms:StrPerms, klass:OptModelType=None, use
             objects = queryset.filter(pk__in=pk_list)
             return objects
 
-    if not any_perm and len(codenames) > 1:
+    if any_perm == False and len(codenames) > 1:
+        # 要求对数据行所拥有的权限,大于所需的权限.
         counts = user_obj_perms_queryset.values(
             user_fields[0]).annotate(object_pk_count=Count(user_fields[0]))
         user_obj_perms_queryset = counts.filter(
@@ -635,6 +614,8 @@ def _filter_perm_pks(*,codenames:Set[str],pk_codename_pairs:List[Tuple[int,str]]
     pk_list = []
     for pk, group in groupby(sorted_pairs, keyfunc):
         obj_codenames = set((e[1] for e in group))
+        # codenames 是指返回的数据所需要拥有的操作权限
+        # obj_codenames 是指对对应的行现在所拥有的所有权限.如果是包含关系即可返回.
         if codenames <= obj_codenames:
             pk_list.append(pk)
     return pk_list
@@ -699,15 +680,19 @@ def get_objects_for_group(group:Group, perms:StrPerms, klass:OptModelType=None, 
     info = _prepare_filter(perms=perms, klass=klass)
     queryset = info.queryset
     codenames = info.codenames
-    ctype = info.ctype
+    ctype = info.ctype # Permission 模型对应的 ContentType
     # At this point, we should have both ctype and queryset and they should
     # match which means: ctype.model_class() == queryset.model
     # we should also have ``codenames`` list
 
     if accept_global_perms:
+        # 如果全局权限有效,也就是属性 Django 中分组的针对表级别的权限.
         group_global_perm_set = set(group.permissions.values_list('codename', flat=True))
+        # 调用时使用的表级权限.
         global_perms = info.codenames & group_global_perm_set
         codenames = info.codenames - global_perms
+        # 如果有表级权限,但是同时也指定了表级别权限则取的是其表级权限的数据.
+        # 也就是返回的数据应当满足所有列出的数据,即用户对返回的数据拥有所列的所有权限.
         if len(global_perms) > 0 and (len(codenames) == 0 or any_perm):
             return queryset
 
