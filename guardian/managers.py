@@ -108,6 +108,17 @@ class BaseObjectPermissionManager(models.Manager):
         warnings.warn("UserObjectPermissionManager method 'assign' is being renamed to 'assign_perm'. Update your code accordingly as old name will be depreciated in 2.0 version.", DeprecationWarning)
         return self.assign_perm(perm, user_or_group, obj)
 
+    def _make_perm_filter(self, *, perm:StrPerm, owner:Owner, obj_or_qs:Union[Model, QuerySet]):
+        is_multiple_objs = isinstance(obj_or_qs, QuerySet)
+        filters = Q(**{self.user_or_group_field: owner})
+        obj_model = obj_or_qs.model if is_multiple_objs else obj_or_qs
+        if isinstance(perm, Permission):
+            filters &= Q(permission=perm)
+        else:
+            filters &= Q(permission__codename=perm,
+                         permission__content_type=get_content_type(obj_model))
+        return filters
+
     def remove_perm(self, perm, user_or_group, obj):
         """
         Removes permission ``perm`` for an instance ``obj`` and given ``user_or_group``.
@@ -120,14 +131,7 @@ class BaseObjectPermissionManager(models.Manager):
             raise ObjectNotPersisted("Object %s needs to be persisted first"
                                      % obj)
 
-        filters = Q(**{self.user_or_group_field: user_or_group})
-
-        if isinstance(perm, Permission):
-            filters &= Q(permission=perm)
-        else:
-            filters &= Q(permission__codename=perm,
-                         permission__content_type=get_content_type(obj))
-
+        filters = self._make_perm_filter(perm=perm, owner=user_or_group, obj_or_qs=obj)
         if self.is_generic():
             filters &= Q(object_pk=obj.pk)
         else:
@@ -142,15 +146,7 @@ class BaseObjectPermissionManager(models.Manager):
         use ``Queryset.delete`` method for removing it. Main implication of this
         is that ``post_delete`` signals would NOT be fired.
         """
-        filters = Q(**{self.user_or_group_field: user_or_group})
-
-        if isinstance(perm, Permission):
-            filters &= Q(permission=perm)
-        else:
-            ctype = get_content_type(queryset.model)
-            filters &= Q(permission__codename=perm,
-                         permission__content_type=ctype)
-
+        filters = self._make_perm_filter(perm=perm, owner=user_or_group, obj_or_qs=queryset)
         if self.is_generic():
             filters &= Q(object_pk__in=[str(pk) for pk in queryset.values_list('pk', flat=True)])
         else:
