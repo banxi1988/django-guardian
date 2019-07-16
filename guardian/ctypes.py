@@ -4,11 +4,11 @@ from django.utils.module_loading import import_string
 from guardian.conf import settings as guardian_settings
 
 
-def get_content_type(obj):
+def get_content_type(obj) -> ContentType:
     get_content_type_function = import_string(
         guardian_settings.GET_CONTENT_TYPE)
     return get_content_type_function(obj)
 
 
-def get_default_content_type(obj):
+def get_default_content_type(obj) -> ContentType :
     return ContentType.objects.get_for_model(obj)

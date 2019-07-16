@@ -1,11 +1,28 @@
+from typing import Union, List, Tuple, Optional
+
+from django.contrib.contenttypes.models import ContentType
 from django.db import models
-from django.db.models import Q
+from django.db.models import Q, QuerySet, Model
 from guardian.core import ObjectPermissionChecker
 from guardian.ctypes import get_content_type
 from guardian.exceptions import ObjectNotPersisted
 from guardian.models import Permission
 
 import warnings
+
+from guardian.typings import StrPerm, Owner
+
+def _check_perm_obj(*,perm:StrPerm,obj:Union[Model,QuerySet]) -> Tuple[Permission,ContentType]:
+    if isinstance(obj,QuerySet):
+        ctype = get_content_type(obj.model)
+    else:
+        if getattr(obj, 'pk', None) is None:
+            raise ObjectNotPersisted("Object %s needs to be persisted first"
+                                     % obj)
+        ctype = get_content_type(obj)
+    if not isinstance(perm, Permission):
+        perm = Permission.objects.get(content_type=ctype, codename=perm)
+    return perm,ctype
 
 
 class BaseObjectPermissionManager(models.Manager):
@@ -25,76 +42,57 @@ class BaseObjectPermissionManager(models.Manager):
         except models.fields.FieldDoesNotExist:
             return False
 
+    def make_base_init_kwargs(self,*,perm:StrPerm,owner:Optional[Owner],obj:Model):
+        permission,ctype = _check_perm_obj(perm=perm,obj=obj)
+        owner_field = self.user_or_group_field
+        if self.is_generic():
+          return {
+              'permission': permission,
+              owner_field:owner,
+              'content_type':ctype,
+              'object_pk': obj.pk
+          }
+        else:
+          return {
+              'permission':permission,
+              owner_field:owner,
+              'content_object':obj
+          }
+
+
     def assign_perm(self, perm, user_or_group, obj):
         """
         Assigns permission with given ``perm`` for an instance ``obj`` and
         ``user``.
         """
-        if getattr(obj, 'pk', None) is None:
-            raise ObjectNotPersisted("Object %s needs to be persisted first"
-                                     % obj)
-        ctype = get_content_type(obj)
-        if not isinstance(perm, Permission):
-            permission = Permission.objects.get(content_type=ctype, codename=perm)
-        else:
-            permission = perm
-
-        kwargs = {'permission': permission, self.user_or_group_field: user_or_group}
-        if self.is_generic():
-            kwargs['content_type'] = ctype
-            kwargs['object_pk'] = obj.pk
-        else:
-            kwargs['content_object'] = obj
+        kwargs = self.make_base_init_kwargs(perm=perm,owner=user_or_group,obj=obj)
         obj_perm, _ = self.get_or_create(**kwargs)
         return obj_perm
 
-    def bulk_assign_perm(self, perm, user_or_group, queryset):
+    def bulk_assign_perm(self, perm:StrPerm, user_or_group:Owner, queryset:QuerySet):
         """
         Bulk assigns permissions with given ``perm`` for an objects in ``queryset`` and
         ``user_or_group``.
         """
 
-        ctype = get_content_type(queryset.model)
-        if not isinstance(perm, Permission):
-            permission = Permission.objects.get(content_type=ctype, codename=perm)
-        else:
-            permission = perm
-
+        permission,ctype = _check_perm_obj(perm=perm,obj=queryset)
         checker = ObjectPermissionChecker(user_or_group)
         checker.prefetch_perms(queryset)
 
         assigned_perms = []
         for instance in queryset:
             if not checker.has_perm(permission.codename, instance):
-                kwargs = {'permission': permission, self.user_or_group_field: user_or_group}
-                if self.is_generic():
-                    kwargs['content_type'] = ctype
-                    kwargs['object_pk'] = instance.pk
-                else:
-                    kwargs['content_object'] = instance
+                kwargs = self.make_base_init_kwargs(perm=permission,owner=user_or_group,obj=instance)
                 assigned_perms.append(self.model(**kwargs))
         self.model.objects.bulk_create(assigned_perms)
 
         return assigned_perms
 
-    def assign_perm_to_many(self, perm, users_or_groups, obj):
+    def assign_perm_to_many(self, perm:StrPerm, users_or_groups:Union[List[Owner],QuerySet], obj:Model):
         """
         Bulk assigns given ``perm`` for the object ``obj`` to a set of users or a set of groups.
         """
-        ctype = get_content_type(obj)
-        if not isinstance(perm, Permission):
-            permission = Permission.objects.get(content_type=ctype,
-                                                codename=perm)
-        else:
-            permission = perm
-
-        kwargs = {'permission': permission}
-        if self.is_generic():
-            kwargs['content_type'] = ctype
-            kwargs['object_pk'] = obj.pk
-        else:
-            kwargs['content_object'] = obj
-
+        kwargs = self.make_base_init_kwargs(perm=perm,owner=None,obj=obj)
         to_add = []
         field = self.user_or_group_field
         for user in users_or_groups:
